@@ -11,7 +11,7 @@ import (
 	"unsafe"
 )
 
-type Port struct {
+type impl struct {
 	f  *os.File
 	fd syscall.Handle
 	rl sync.Mutex
@@ -19,6 +19,8 @@ type Port struct {
 	ro *syscall.Overlapped
 	wo *syscall.Overlapped
 }
+
+var _ Port = (*impl)(nil)
 
 type structDCB struct {
 	DCBlength, BaudRate                            uint32
@@ -37,7 +39,7 @@ type structTimeouts struct {
 	WriteTotalTimeoutConstant   uint32
 }
 
-func openPort(name string, baud int, databits byte, parity Parity, stopbits StopBits, readTimeout time.Duration) (p *Port, err error) {
+func openPort(name string, baud int, databits byte, parity Parity, stopbits StopBits, readTimeout time.Duration) (p Port, err error) {
 	if len(name) > 0 && name[0] != '\\' {
 		name = "\\\\.\\" + name
 	}
@@ -55,7 +57,7 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 	f := os.NewFile(uintptr(h), name)
 	defer func() {
 		if err != nil {
-			f.Close()
+			_ = f.Close()
 		}
 	}()
 
@@ -80,7 +82,8 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 	if err != nil {
 		return nil, err
 	}
-	port := new(Port)
+
+	port := new(impl)
 	port.f = f
 	port.fd = h
 	port.ro = ro
@@ -89,11 +92,23 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 	return port, nil
 }
 
-func (p *Port) Close() error {
+func (p *impl) Status() (uint, error) {
+	return 0, ErrNotSupported
+}
+
+func (p *impl) SetDTR(bool) error {
+	return ErrNotSupported
+}
+
+func (p *impl) SetRTS(bool) error {
+	return ErrNotSupported
+}
+
+func (p *impl) Close() error {
 	return p.f.Close()
 }
 
-func (p *Port) Write(buf []byte) (int, error) {
+func (p *impl) Write(buf []byte) (int, error) {
 	p.wl.Lock()
 	defer p.wl.Unlock()
 
@@ -108,7 +123,7 @@ func (p *Port) Write(buf []byte) (int, error) {
 	return getOverlappedResult(p.fd, p.wo)
 }
 
-func (p *Port) Read(buf []byte) (int, error) {
+func (p *impl) Read(buf []byte) (int, error) {
 	if p == nil || p.f == nil {
 		return 0, fmt.Errorf("Invalid port on read")
 	}
@@ -129,7 +144,7 @@ func (p *Port) Read(buf []byte) (int, error) {
 
 // Discards data written to the port but not transmitted,
 // or data received but not read
-func (p *Port) Flush() error {
+func (p *impl) Flush() error {
 	return purgeComm(p.fd)
 }
 

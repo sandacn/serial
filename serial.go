@@ -57,6 +57,7 @@ package serial
 
 import (
 	"errors"
+	"io"
 	"time"
 )
 
@@ -115,27 +116,41 @@ type Config struct {
 	// CRLFTranslate bool
 }
 
+type Port interface {
+	io.ReadWriteCloser
+	Flush() error
+	Status() (uint, error)
+	SetDTR(bool) error
+	SetRTS(bool) error
+}
+
+var ErrNotSupported = errors.New("serial: not supported")
+
 // ErrBadSize is returned if Size is not supported.
-var ErrBadSize error = errors.New("unsupported serial data size")
+var ErrBadSize = errors.New("unsupported serial data size")
 
 // ErrBadStopBits is returned if the specified StopBits setting not supported.
-var ErrBadStopBits error = errors.New("unsupported stop bit setting")
+var ErrBadStopBits = errors.New("unsupported stop bit setting")
 
 // ErrBadParity is returned if the parity is not supported.
-var ErrBadParity error = errors.New("unsupported parity setting")
+var ErrBadParity = errors.New("unsupported parity setting")
 
 // OpenPort opens a serial port with the specified configuration
-func OpenPort(c *Config) (*Port, error) {
+func OpenPort(c *Config) (Port, error) {
 	size, par, stop := c.Size, c.Parity, c.StopBits
+
 	if size == 0 {
 		size = DefaultSize
 	}
+
 	if par == 0 {
 		par = ParityNone
 	}
+
 	if stop == 0 {
 		stop = Stop1
 	}
+
 	return openPort(c.Name, c.Baud, size, par, stop, c.ReadTimeout)
 }
 
@@ -149,7 +164,7 @@ func posixTimeoutValues(readTimeout time.Duration) (vmin uint8, vtime uint8) {
 		// EOF on zero read
 		minBytesToRead = 0
 		// convert timeout to deciseconds as expected by VTIME
-		readTimeoutInDeci = (readTimeout.Nanoseconds() / 1e6 / 100)
+		readTimeoutInDeci = readTimeout.Nanoseconds() / 1e6 / 100
 		// capping the timeout
 		if readTimeoutInDeci < 1 {
 			// min possible timeout 1 Deciseconds (0.1s)
