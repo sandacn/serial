@@ -98,7 +98,6 @@ const (
 type Config struct {
 	Name        string
 	Baud        int
-	ReadTimeout time.Duration // Total timeout
 
 	// Size is the number of data bits. If 0, DefaultSize is used.
 	Size byte
@@ -108,16 +107,11 @@ type Config struct {
 
 	// Number of stop bits to use. Default is 1 (1 stop bit).
 	StopBits StopBits
-
-	// RTSFlowControl bool
-	// DTRFlowControl bool
-	// XONFlowControl bool
-
-	// CRLFTranslate bool
 }
 
 type Port interface {
 	io.ReadWriteCloser
+	SetReadDeadline(time time.Time) error
 	Flush() error
 	Status() (uint, error)
 	SetDTR(bool) error
@@ -151,32 +145,5 @@ func OpenPort(c *Config) (Port, error) {
 		stop = Stop1
 	}
 
-	return openPort(c.Name, c.Baud, size, par, stop, c.ReadTimeout)
+	return openPort(c.Name, c.Baud, size, par, stop)
 }
-
-// Converts the timeout values for Linux / POSIX systems
-func posixTimeoutValues(readTimeout time.Duration) (vmin uint8, vtime uint8) {
-	const MAXUINT8 = 1<<8 - 1 // 255
-	// set blocking / non-blocking read
-	var minBytesToRead uint8 = 1
-	var readTimeoutInDeci int64
-	if readTimeout > 0 {
-		// EOF on zero read
-		minBytesToRead = 0
-		// convert timeout to deciseconds as expected by VTIME
-		readTimeoutInDeci = readTimeout.Nanoseconds() / 1e6 / 100
-		// capping the timeout
-		if readTimeoutInDeci < 1 {
-			// min possible timeout 1 Deciseconds (0.1s)
-			readTimeoutInDeci = 1
-		} else if readTimeoutInDeci > MAXUINT8 {
-			// max possible timeout is 255 deciseconds (25.5s)
-			readTimeoutInDeci = MAXUINT8
-		}
-	}
-	return minBytesToRead, uint8(readTimeoutInDeci)
-}
-
-// func SendBreak()
-
-// func RegisterBreakHandler(func())

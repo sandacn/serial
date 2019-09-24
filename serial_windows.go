@@ -4,6 +4,7 @@ package serial
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"sync"
 	"syscall"
@@ -23,12 +24,21 @@ type impl struct {
 var _ Port = (*impl)(nil)
 
 type structDCB struct {
-	DCBlength, BaudRate                            uint32
-	flags                                          [4]byte
-	wReserved, XonLim, XoffLim                     uint16
-	ByteSize, Parity, StopBits                     byte
-	XonChar, XoffChar, ErrorChar, EofChar, EvtChar byte
-	wReserved1                                     uint16
+	DCBlength  uint32
+	BaudRate   uint32
+	flags      [4]byte
+	wReserved  uint16
+	XonLim     uint16
+	XoffLim    uint16
+	ByteSize   byte
+	Parity     byte
+	StopBits   byte
+	XonChar    byte
+	XoffChar   byte
+	ErrorChar  byte
+	EofChar    byte
+	EvtChar    byte
+	wReserved1 uint16
 }
 
 type structTimeouts struct {
@@ -39,38 +49,49 @@ type structTimeouts struct {
 	WriteTotalTimeoutConstant   uint32
 }
 
-func openPort(name string, baud int, databits byte, parity Parity, stopbits StopBits, readTimeout time.Duration) (p Port, err error) {
+func openPort(name string, baud int, databits byte, parity Parity, stopbits StopBits) (p Port, err error) {
 	if len(name) > 0 && name[0] != '\\' {
 		name = "\\\\.\\" + name
 	}
 
-	h, err := syscall.CreateFile(syscall.StringToUTF16Ptr(name),
+	var utfName *uint16
+	if utfName, err = syscall.UTF16PtrFromString(name); err != nil {
+		return
+	}
+
+	pt := &impl{}
+
+	pt.fd, err = syscall.CreateFile(utfName,
 		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
 		0,
 		nil,
 		syscall.OPEN_EXISTING,
 		syscall.FILE_ATTRIBUTE_NORMAL|syscall.FILE_FLAG_OVERLAPPED,
 		0)
+
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(h), name)
+
+	pt.f = os.NewFile(uintptr(pt.fd), name)
 	defer func() {
 		if err != nil {
-			_ = f.Close()
+			_ = pt.f.Close()
 		}
 	}()
 
-	if err = setCommState(h, baud, databits, parity, stopbits); err != nil {
+	if err = pt.setCommState(baud, databits, parity, stopbits); err != nil {
 		return nil, err
 	}
-	if err = setupComm(h, 64, 64); err != nil {
+	if err = pt.setupComm(64, 64); err != nil {
 		return nil, err
 	}
-	if err = setCommTimeouts(h, readTimeout); err != nil {
+
+	if err = pt.SetReadDeadline(time.Time{}); err != nil {
 		return nil, err
 	}
-	if err = setCommMask(h); err != nil {
+
+	if err = pt.setCommMask(); err != nil {
 		return nil, err
 	}
 
@@ -83,13 +104,22 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 		return nil, err
 	}
 
-	port := new(impl)
-	port.f = f
-	port.fd = h
-	port.ro = ro
-	port.wo = wo
+	pt.ro = ro
+	pt.wo = wo
 
-	return port, nil
+	p = pt
+
+	return
+}
+
+func (p *impl) SetReadDeadline(t time.Time) error {
+	var duration time.Duration
+
+	if !t.IsZero() {
+		duration = t.Sub(time.Now())
+	}
+
+	return p.setCommTimeouts(duration)
 }
 
 func (p *impl) Status() (uint, error) {
@@ -112,7 +142,7 @@ func (p *impl) Write(buf []byte) (int, error) {
 	p.wl.Lock()
 	defer p.wl.Unlock()
 
-	if err := resetEvent(p.wo.HEvent); err != nil {
+	if err := p.resetEvent(p.wo.HEvent); err != nil {
 		return 0, err
 	}
 	var n uint32
@@ -120,18 +150,18 @@ func (p *impl) Write(buf []byte) (int, error) {
 	if err != nil && err != syscall.ERROR_IO_PENDING {
 		return int(n), err
 	}
-	return getOverlappedResult(p.fd, p.wo)
+	return p.getOverlappedResult(p.fd, p.wo)
 }
 
 func (p *impl) Read(buf []byte) (int, error) {
 	if p == nil || p.f == nil {
-		return 0, fmt.Errorf("Invalid port on read")
+		return 0, fmt.Errorf("serial: invalid port on read")
 	}
 
 	p.rl.Lock()
 	defer p.rl.Unlock()
 
-	if err := resetEvent(p.ro.HEvent); err != nil {
+	if err := p.resetEvent(p.ro.HEvent); err != nil {
 		return 0, err
 	}
 	var done uint32
@@ -139,13 +169,13 @@ func (p *impl) Read(buf []byte) (int, error) {
 	if err != nil && err != syscall.ERROR_IO_PENDING {
 		return int(done), err
 	}
-	return getOverlappedResult(p.fd, p.ro)
+	return p.getOverlappedResult(p.fd, p.ro)
 }
 
 // Discards data written to the port but not transmitted,
 // or data received but not read
 func (p *impl) Flush() error {
-	return purgeComm(p.fd)
+	return p.purgeComm()
 }
 
 var (
@@ -165,7 +195,9 @@ func init() {
 	if err != nil {
 		panic("LoadLibrary " + err.Error())
 	}
-	defer syscall.FreeLibrary(k32)
+	defer func() {
+		_ = syscall.FreeLibrary(k32)
+	}()
 
 	nSetCommState = getProcAddr(k32, "SetCommState")
 	nSetCommTimeouts = getProcAddr(k32, "SetCommTimeouts")
@@ -186,7 +218,7 @@ func getProcAddr(lib syscall.Handle, name string) uintptr {
 	return addr
 }
 
-func setCommState(h syscall.Handle, baud int, databits byte, parity Parity, stopbits StopBits) error {
+func (p *impl) setCommState(baud int, databits byte, parity Parity, stopbits StopBits) error {
 	var params structDCB
 	params.DCBlength = uint32(unsafe.Sizeof(params))
 
@@ -223,27 +255,26 @@ func setCommState(h syscall.Handle, baud int, databits byte, parity Parity, stop
 		return ErrBadStopBits
 	}
 
-	r, _, err := syscall.Syscall(nSetCommState, 2, uintptr(h), uintptr(unsafe.Pointer(&params)), 0)
+	r, _, err := syscall.Syscall(nSetCommState, 2, uintptr(p.fd), uintptr(unsafe.Pointer(&params)), 0)
 	if r == 0 {
 		return err
 	}
 	return nil
 }
 
-func setCommTimeouts(h syscall.Handle, readTimeout time.Duration) error {
+func (p *impl) setCommTimeouts(readTimeout time.Duration) error {
 	var timeouts structTimeouts
-	const MAXDWORD = 1<<32 - 1
 
 	// blocking read by default
-	var timeoutMs int64 = MAXDWORD - 1
+	var timeoutMs int64 = math.MaxUint32 - 1
 
 	if readTimeout > 0 {
 		// non-blocking read
 		timeoutMs = readTimeout.Nanoseconds() / 1e6
 		if timeoutMs < 1 {
 			timeoutMs = 1
-		} else if timeoutMs > MAXDWORD-1 {
-			timeoutMs = MAXDWORD - 1
+		} else if timeoutMs > math.MaxUint32-1 {
+			timeoutMs = math.MaxUint32 - 1
 		}
 	}
 
@@ -269,35 +300,36 @@ func setCommTimeouts(h syscall.Handle, readTimeout time.Duration) error {
 		       ReadTotalTimeoutConstant, ReadFile times out.
 	*/
 
-	timeouts.ReadIntervalTimeout = MAXDWORD
-	timeouts.ReadTotalTimeoutMultiplier = MAXDWORD
+	timeouts.ReadIntervalTimeout = math.MaxUint32
+	timeouts.ReadTotalTimeoutMultiplier = math.MaxUint32
 	timeouts.ReadTotalTimeoutConstant = uint32(timeoutMs)
 
-	r, _, err := syscall.Syscall(nSetCommTimeouts, 2, uintptr(h), uintptr(unsafe.Pointer(&timeouts)), 0)
+	r, _, err := syscall.Syscall(nSetCommTimeouts, 2, uintptr(p.fd), uintptr(unsafe.Pointer(&timeouts)), 0)
+	if r == 0 {
+		return err
+	}
+
+	return nil
+}
+
+func (p *impl) setupComm(in, out int) error {
+	r, _, err := syscall.Syscall(nSetupComm, 3, uintptr(p.fd), uintptr(in), uintptr(out))
 	if r == 0 {
 		return err
 	}
 	return nil
 }
 
-func setupComm(h syscall.Handle, in, out int) error {
-	r, _, err := syscall.Syscall(nSetupComm, 3, uintptr(h), uintptr(in), uintptr(out))
-	if r == 0 {
-		return err
-	}
-	return nil
-}
-
-func setCommMask(h syscall.Handle) error {
+func (p *impl) setCommMask() error {
 	const EV_RXCHAR = 0x0001
-	r, _, err := syscall.Syscall(nSetCommMask, 2, uintptr(h), EV_RXCHAR, 0)
+	r, _, err := syscall.Syscall(nSetCommMask, 2, uintptr(p.fd), EV_RXCHAR, 0)
 	if r == 0 {
 		return err
 	}
 	return nil
 }
 
-func resetEvent(h syscall.Handle) error {
+func (p *impl) resetEvent(h syscall.Handle) error {
 	r, _, err := syscall.Syscall(nResetEvent, 1, uintptr(h), 0, 0)
 	if r == 0 {
 		return err
@@ -305,12 +337,12 @@ func resetEvent(h syscall.Handle) error {
 	return nil
 }
 
-func purgeComm(h syscall.Handle) error {
+func (p *impl) purgeComm() error {
 	const PURGE_TXABORT = 0x0001
 	const PURGE_RXABORT = 0x0002
 	const PURGE_TXCLEAR = 0x0004
 	const PURGE_RXCLEAR = 0x0008
-	r, _, err := syscall.Syscall(nPurgeComm, 2, uintptr(h),
+	r, _, err := syscall.Syscall(nPurgeComm, 2, uintptr(p.fd),
 		PURGE_TXABORT|PURGE_RXABORT|PURGE_TXCLEAR|PURGE_RXCLEAR, 0)
 	if r == 0 {
 		return err
@@ -328,7 +360,7 @@ func newOverlapped() (*syscall.Overlapped, error) {
 	return &overlapped, nil
 }
 
-func getOverlappedResult(h syscall.Handle, overlapped *syscall.Overlapped) (int, error) {
+func (p *impl) getOverlappedResult(h syscall.Handle, overlapped *syscall.Overlapped) (int, error) {
 	var n int
 	r, _, err := syscall.Syscall6(nGetOverlappedResult, 4,
 		uintptr(h),
