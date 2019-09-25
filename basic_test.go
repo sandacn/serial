@@ -14,8 +14,8 @@ func TestConnection(t *testing.T) {
 	if port0 == "" || port1 == "" {
 		t.Skip("Skipping test because PORT0 or PORT1 environment variable is not set")
 	}
-	c0 := &Config{Name: port0, Baud: 115200}
-	c1 := &Config{Name: port1, Baud: 115200}
+	c0 := Config{Name: port0, Baud: 115200}
+	c1 := Config{Name: port1, Baud: 115200}
 
 	s1, err := OpenPort(c0)
 	if err != nil {
@@ -60,7 +60,7 @@ func TestConnection(t *testing.T) {
 	time.Sleep(time.Second / 10)
 
 	ch <- 0
-	s1.Write([]byte(" ")) // We could be blocked in the read without this
+	_, _ = s1.Write([]byte(" ")) // We could be blocked in the read without this
 	c := <-ch
 	exp := 5
 	if c >= exp {
