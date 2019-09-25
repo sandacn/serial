@@ -130,7 +130,7 @@ var ErrBadStopBits = errors.New("unsupported stop bit setting")
 var ErrBadParity = errors.New("unsupported parity setting")
 
 // OpenPort opens a serial port with the specified configuration
-func OpenPort(c *Config) (Port, error) {
+func OpenPort(c Config) (Port, error) {
 	size, par, stop := c.Size, c.Parity, c.StopBits
 
 	if size == 0 {
