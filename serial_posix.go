@@ -20,18 +20,21 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const maxReadTimeout = (25 * time.Second) + (500 * time.Millisecond)
+
 type impl struct {
 	// We intentionally do not use an "embedded" struct so that we
 	// don't export File
-	f  *os.File
-	fd uintptr
-	st C.struct_termios
+	c       *Config
+	f       *os.File
+	fd      uintptr
+	st      C.struct_termios
 }
 
 var _ Port = (*impl)(nil)
 
-func openPort(name string, baud int, databits byte, parity Parity, stopbits StopBits) (p Port, err error) {
-	f, err := os.OpenFile(name, syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_NONBLOCK, 0666)
+func openPort(c Config) (p Port, err error) {
+	f, err := os.OpenFile(c.Name, syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_NONBLOCK, 0666)
 	if err != nil {
 		return
 	}
@@ -43,7 +46,8 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 	}()
 
 	pt := &impl{
-		f: f,
+		c:  &c,
+		f:  f,
 		fd: f.Fd(),
 	}
 
@@ -57,7 +61,7 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 	}
 
 	var speed C.speed_t
-	switch baud {
+	switch c.Baud {
 	case 230400:
 		speed = C.B230400
 	case 115200:
@@ -93,10 +97,11 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 	case 50:
 		speed = C.B50
 	default:
-		err = fmt.Errorf("serial: unknown baud rate %v", baud)
+		err = fmt.Errorf("serial: unknown baud rate %v", c.Baud)
 		return
 	}
 
+	// by some bizarre input and output speeds set by separate calls
 	if _, err = C.cfsetispeed(&pt.st, speed); err != nil {
 		return
 	}
@@ -113,7 +118,7 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 	pt.st.c_cflag |= C.CLOCAL | C.CREAD
 
 	// databits
-	switch databits {
+	switch c.Size {
 	case 5:
 		pt.st.c_cflag |= C.CS5
 	case 6:
@@ -128,7 +133,7 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 	}
 
 	// Parity settings
-	switch parity {
+	switch c.Parity {
 	case ParityNone:
 		// default is no parity
 	case ParityOdd:
@@ -142,7 +147,7 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 		return
 	}
 	// Stop bits settings
-	switch stopbits {
+	switch c.StopBits {
 	case Stop1:
 		// as is, default is 1 bit
 	case Stop2:
@@ -151,11 +156,28 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 		err = ErrBadStopBits
 		return
 	}
+
 	// Select raw mode
 	pt.st.c_lflag &= ^C.tcflag_t(C.ICANON | C.ECHO | C.ECHOE | C.ISIG)
 	pt.st.c_oflag &= ^C.tcflag_t(C.OPOST)
 
-	if err = pt.SetReadDeadline(time.Time{}); err != nil {
+	// Disable RTS/CTS hardware flow control
+	// pt.st.c_cflag &= ^C.tcflag_t(C.CRTSCTS)
+
+	if err = pt.Flush(); err != nil {
+		return
+	}
+
+	if err = pt.setTimeouts(1, posixTimeoutValue(c.timeout)); err != nil {
+		return
+	}
+
+	r1, _, e := syscall.Syscall(syscall.SYS_FCNTL,
+		pt.fd,
+		uintptr(syscall.F_SETFL),
+		uintptr(0))
+	if e != 0 || r1 != 0 {
+		err = fmt.Errorf("serial: clearing NONBLOCK syscall error: %s, %d", e, r1)
 		return
 	}
 
@@ -164,39 +186,91 @@ func openPort(name string, baud int, databits byte, parity Parity, stopbits Stop
 	return
 }
 
-// set blocking / non-blocking read
-
-func (p *impl) SetReadDeadline(t time.Time) error {
-	var duration time.Duration
-
-	if !t.IsZero() {
-		duration = t.Sub(time.Now())
-	}
-
-	vmin, vtime := posixTimeoutValues(duration)
-	p.st.c_cc[C.VMIN] = C.cc_t(vmin)
-	p.st.c_cc[C.VTIME] = C.cc_t(vtime)
+func (p *impl) setTimeouts(vMin, vTime uint8) error {
+	p.st.c_cc[C.VMIN] = C.cc_t(vMin)
+	p.st.c_cc[C.VTIME] = C.cc_t(vTime)
 
 	if _, err := C.tcsetattr(C.int(p.fd), C.TCSANOW, &p.st); err != nil {
 		return err
 	}
 
-	r1, _, e := syscall.Syscall(syscall.SYS_FCNTL,
-		p.fd,
-		uintptr(syscall.F_SETFL),
-		uintptr(0))
-	if e != 0 || r1 != 0 {
-		return fmt.Errorf("serial: clearing NONBLOCK syscall error: %s, %d", e, r1)
-	}
+	return nil
+}
+
+// SetReadDeadline
+func (p *impl) SetReadDeadline(t time.Duration) error {
+	p.c.timeout = t
 
 	return nil
 }
 
 func (p *impl) Read(b []byte) (n int, err error) {
-	return p.f.Read(b)
+	remaining := len(b)
+
+	if remaining == 0 {
+		return 0, ErrInvalidArg
+	}
+
+	defer func() {
+		if p.c.DumpRx != nil && n > 0 {
+			p.c.DumpRx(b[:n])
+		}
+	}()
+
+	remainingTimeout := p.c.timeout
+
+	if remainingTimeout == 0 {
+		if err = p.setTimeouts(0, 0); err != nil {
+			return
+		}
+
+		return p.f.Read(b)
+	}
+
+	offset := 0
+
+	for remaining > 0 {
+		toRead := remaining
+		if toRead > 255 {
+			toRead = 255
+		}
+
+		vMin := uint8(toRead)
+		vTime := uint8(0)
+
+		if remainingTimeout < MaxTimeout {
+			t := remainingTimeout
+			if t >= maxReadTimeout {
+				t = maxReadTimeout
+			}
+
+			remainingTimeout -= t
+
+			vTime = posixTimeoutValue(t)
+		}
+
+		if err = p.setTimeouts(vMin, vTime); err != nil {
+			return
+		}
+
+		var nRead int
+		nRead, err = p.f.Read(b[offset:])
+		n += nRead
+		remaining -= nRead
+		offset += nRead
+		if err != nil {
+			return
+		}
+	}
+
+	return
 }
 
 func (p *impl) Write(b []byte) (n int, err error) {
+	if p.c.DumpTx != nil {
+		p.c.DumpTx(b)
+	}
+
 	return p.f.Write(b)
 }
 
@@ -268,15 +342,10 @@ func (p *impl) Close() (err error) {
  * http://man7.org/linux/man-pages/man3/termios.3.html
  * - Supports blocking read and read with timeout operations
  */
-func posixTimeoutValues(duration time.Duration) (vmin uint8, vtime uint8) {
-	// set blocking / non-blocking read
-
-	var minBytesToRead uint8 = 1
+func posixTimeoutValue(duration time.Duration) (vtime uint8) {
 	var readTimeoutInDeci int64
 
 	if duration > 0 {
-		// EOF on zero read
-		minBytesToRead = 0
 		// convert timeout to deciseconds as expected by VTIME
 		readTimeoutInDeci = duration.Nanoseconds() / 1e6 / 100
 		// capping the timeout
@@ -289,5 +358,5 @@ func posixTimeoutValues(duration time.Duration) (vmin uint8, vtime uint8) {
 		}
 	}
 
-	return minBytesToRead, uint8(readTimeoutInDeci)
+	return uint8(readTimeoutInDeci)
 }

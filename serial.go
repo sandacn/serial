@@ -67,6 +67,10 @@ type StopBits byte
 type Parity byte
 
 const (
+	MaxTimeout = time.Duration(1<<63 - 1)
+)
+
+const (
 	Stop1     StopBits = 1
 	Stop1Half StopBits = 15
 	Stop2     StopBits = 2
@@ -96,8 +100,8 @@ const (
 //    c1.ReadTimeout = time.Millisecond * 500
 //
 type Config struct {
-	Name        string
-	Baud        int
+	Name string
+	Baud int
 
 	// Size is the number of data bits. If 0, DefaultSize is used.
 	Size byte
@@ -107,11 +111,16 @@ type Config struct {
 
 	// Number of stop bits to use. Default is 1 (1 stop bit).
 	StopBits StopBits
+
+	DumpRx func([]byte)
+	DumpTx func([]byte)
+
+	timeout time.Duration
 }
 
 type Port interface {
 	io.ReadWriteCloser
-	SetReadDeadline(time time.Time) error
+	SetReadDeadline(period time.Duration) error
 	Flush() error
 	Status() (uint, error)
 	SetDTR(bool) error
@@ -121,29 +130,31 @@ type Port interface {
 var ErrNotSupported = errors.New("serial: not supported")
 
 // ErrBadSize is returned if Size is not supported.
-var ErrBadSize = errors.New("unsupported serial data size")
+var ErrBadSize = errors.New("serial: unsupported serial data size")
 
 // ErrBadStopBits is returned if the specified StopBits setting not supported.
-var ErrBadStopBits = errors.New("unsupported stop bit setting")
+var ErrBadStopBits = errors.New("serial: unsupported stop bit setting")
 
 // ErrBadParity is returned if the parity is not supported.
-var ErrBadParity = errors.New("unsupported parity setting")
+var ErrBadParity = errors.New("serial: unsupported parity setting")
+
+var ErrInvalidArg = errors.New("serial: invalid argument")
 
 // OpenPort opens a serial port with the specified configuration
 func OpenPort(c Config) (Port, error) {
-	size, par, stop := c.Size, c.Parity, c.StopBits
-
-	if size == 0 {
-		size = DefaultSize
+	if c.Size == 0 {
+		c.Size = DefaultSize
 	}
 
-	if par == 0 {
-		par = ParityNone
+	if c.Parity == 0 {
+		c.Parity = ParityNone
 	}
 
-	if stop == 0 {
-		stop = Stop1
+	if c.StopBits == 0 {
+		c.StopBits = Stop1
 	}
 
-	return openPort(c.Name, c.Baud, size, par, stop)
+	c.timeout = MaxTimeout
+
+	return openPort(c)
 }
