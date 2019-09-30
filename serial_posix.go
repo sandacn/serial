@@ -168,7 +168,7 @@ func openPort(c Config) (p Port, err error) {
 		return
 	}
 
-	if err = pt.setTimeouts(1, posixTimeoutValue(c.timeout)); err != nil {
+	if err = pt.setTimeouts(1, 0); err != nil {
 		return
 	}
 
@@ -205,66 +205,70 @@ func (p *impl) SetReadDeadline(t time.Duration) error {
 }
 
 func (p *impl) Read(b []byte) (n int, err error) {
-	remaining := len(b)
-
-	if remaining == 0 {
-		return 0, ErrInvalidArg
-	}
-
-	defer func() {
-		if p.c.DumpRx != nil && n > 0 {
-			p.c.DumpRx(b[:n])
-		}
-	}()
-
-	remainingTimeout := p.c.timeout
-
-	if remainingTimeout == 0 {
-		if err = p.setTimeouts(0, 0); err != nil {
-			return
-		}
-
-		return p.f.Read(b)
-	}
-
-	offset := 0
-
-	for remaining > 0 {
-		toRead := remaining
-		if toRead > 255 {
-			toRead = 255
-		}
-
-		vMin := uint8(toRead)
-		vTime := uint8(0)
-
-		if remainingTimeout < MaxTimeout {
-			t := remainingTimeout
-			if t >= maxReadTimeout {
-				t = maxReadTimeout
-			}
-
-			remainingTimeout -= t
-
-			vTime = posixTimeoutValue(t)
-		}
-
-		if err = p.setTimeouts(vMin, vTime); err != nil {
-			return
-		}
-
-		var nRead int
-		nRead, err = p.f.Read(b[offset:])
-		n += nRead
-		remaining -= nRead
-		offset += nRead
-		if err != nil {
-			return
-		}
-	}
-
-	return
+	return p.f.Read(b)
 }
+
+// func (p *impl) Read(b []byte) (n int, err error) {
+// 	remaining := len(b)
+//
+// 	if remaining == 0 {
+// 		return 0, ErrInvalidArg
+// 	}
+//
+// 	defer func() {
+// 		if p.c.DumpRx != nil && n > 0 {
+// 			p.c.DumpRx(b[:n])
+// 		}
+// 	}()
+//
+// 	remainingTimeout := p.c.timeout
+//
+// 	if remainingTimeout == 0 {
+// 		if err = p.setTimeouts(0, 0); err != nil {
+// 			return
+// 		}
+//
+// 		return p.f.Read(b)
+// 	}
+//
+// 	offset := 0
+//
+// 	for remaining > 0 {
+// 		toRead := remaining
+// 		if toRead > 255 {
+// 			toRead = 255
+// 		}
+//
+// 		vMin := uint8(toRead)
+// 		vTime := uint8(0)
+//
+// 		if remainingTimeout < MaxTimeout {
+// 			t := remainingTimeout
+// 			if t >= maxReadTimeout {
+// 				t = maxReadTimeout
+// 			}
+//
+// 			remainingTimeout -= t
+//
+// 			vTime = posixTimeoutValue(t)
+// 		}
+//
+// 		if err = p.setTimeouts(vMin, vTime); err != nil {
+// 			return
+// 		}
+//
+// 		var nRead int
+// 		nRead, err = p.f.Read(b[offset:])
+// 		n += nRead
+// 		remaining -= nRead
+// 		offset += nRead
+// 		if err != nil {
+// 			return
+// 		}
+// 	}
+//
+// 	return
+// }
 
 func (p *impl) Write(b []byte) (n int, err error) {
 	if p.c.DumpTx != nil {
