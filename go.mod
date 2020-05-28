@@ -1,4 +1,4 @@
-module github.com/NotifAi/serial
+module github.com/notifai/serial
 
 go 1.13
 
