@@ -120,6 +120,7 @@ type Config struct {
 
 type Port interface {
 	io.ReadWriteCloser
+	SetReadDeadline(time.Duration) error
 	Flush() error
 	Status() (uint, error)
 	SetDTR(bool) error
