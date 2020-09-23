@@ -68,6 +68,7 @@ type Port interface {
 	Status() (uint, error)
 	SetDTR(bool) error
 	SetRTS(bool) error
+	SetParity(Parity) error
 }
 
 var ErrNotSupported = errors.New("serial: not supported")

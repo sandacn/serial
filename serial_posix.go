@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -25,10 +26,11 @@ const maxReadTimeout = (25 * time.Second) + (500 * time.Millisecond)
 type impl struct {
 	// We intentionally do not use an "embedded" struct so that we
 	// don't export File
-	c       *Config
-	f       *os.File
-	fd      uintptr
-	st      C.struct_termios
+	mu sync.Mutex
+	c  *Config
+	f  *os.File
+	fd uintptr
+	st C.struct_termios
 }
 
 var _ Port = (*impl)(nil)
@@ -146,6 +148,7 @@ func openPort(c Config) (p Port, err error) {
 		err = ErrBadParity
 		return
 	}
+
 	// Stop bits settings
 	switch c.StopBits {
 	case Stop1:
@@ -189,6 +192,31 @@ func openPort(c Config) (p Port, err error) {
 func (p *impl) setTimeouts(vMin, vTime uint8) error {
 	p.st.c_cc[C.VMIN] = C.cc_t(vMin)
 	p.st.c_cc[C.VTIME] = C.cc_t(vTime)
+
+	if _, err := C.tcsetattr(C.int(p.fd), C.TCSANOW, &p.st); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *impl) SetParity(val Parity) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Parity settings
+	switch val {
+	case ParityNone:
+		// default is no parity
+	case ParityOdd:
+		p.st.c_cflag |= C.PARENB
+		p.st.c_cflag |= C.PARODD
+	case ParityEven:
+		p.st.c_cflag |= C.PARENB
+		p.st.c_cflag &= ^C.tcflag_t(C.PARODD)
+	default:
+		return ErrBadParity
+	}
 
 	if _, err := C.tcsetattr(C.int(p.fd), C.TCSANOW, &p.st); err != nil {
 		return err
